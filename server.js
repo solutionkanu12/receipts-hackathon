@@ -16,6 +16,8 @@ app.get('/api/health', (req, res) => {
 
 const BTL_API_URL = 'https://api.badtheorylabs.com/v1/chat/completions';
 const BTL_MODEL = 'btl-2';
+const ESCALATION_MODEL = 'gpt-5-5';
+const ESCALATION_KEYWORDS = ['refund', 'cancel', 'complaint', 'lawyer', 'manager', 'angry', 'furious'];
 
 const SYSTEM_PROMPT = 'You are a support assistant for a small online retailer. Return policy: unused items can be returned within 30 days with a receipt.';
 
@@ -29,8 +31,9 @@ app.post('/api/chat', async (req, res) => {
   }
 
   const normalized = message.trim().toLowerCase();
+  const isEscalated = ESCALATION_KEYWORDS.some((keyword) => normalized.includes(keyword));
 
-  if (questionCache.has(normalized)) {
+  if (!isEscalated && questionCache.has(normalized)) {
     return res.json({
       reply: questionCache.get(normalized),
       model: 'cache',
@@ -47,7 +50,7 @@ app.post('/api/chat', async (req, res) => {
         Authorization: `Bearer ${process.env.BTL_API_KEY}`,
       },
       body: JSON.stringify({
-        model: BTL_MODEL,
+        model: isEscalated ? ESCALATION_MODEL : BTL_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: message },
@@ -62,12 +65,15 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const reply = data.choices?.[0]?.message?.content;
-    questionCache.set(normalized, reply);
+
+    if (!isEscalated) {
+      questionCache.set(normalized, reply);
+    }
 
     res.json({
       reply,
       model: data.model,
-      status: 'ROUTED',
+      status: isEscalated ? 'ESCALATED' : 'ROUTED',
       usage: data.usage,
     });
   } catch (err) {
