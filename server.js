@@ -19,11 +19,24 @@ const BTL_MODEL = 'btl-2';
 
 const SYSTEM_PROMPT = 'You are a support assistant for a small online retailer. Return policy: unused items can be returned within 30 days with a receipt.';
 
+const questionCache = new Map();
+
 app.post('/api/chat', async (req, res) => {
   const { message } = req.body || {};
 
   if (typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({ error: 'message is required' });
+  }
+
+  const normalized = message.trim().toLowerCase();
+
+  if (questionCache.has(normalized)) {
+    return res.json({
+      reply: questionCache.get(normalized),
+      model: 'cache',
+      status: 'CACHE_HIT',
+      usage: null,
+    });
   }
 
   try {
@@ -48,9 +61,13 @@ app.post('/api/chat', async (req, res) => {
       return res.status(btlRes.status).json({ error: data.error || data });
     }
 
+    const reply = data.choices?.[0]?.message?.content;
+    questionCache.set(normalized, reply);
+
     res.json({
-      reply: data.choices?.[0]?.message?.content,
+      reply,
       model: data.model,
+      status: 'ROUTED',
       usage: data.usage,
     });
   } catch (err) {
