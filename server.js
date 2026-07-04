@@ -16,6 +16,7 @@ app.get('/api/health', (req, res) => {
 
 const BTL_API_URL = 'https://api.badtheorylabs.com/v1/chat/completions';
 const BTL_PRICING_URL = 'https://api.badtheorylabs.com/v1/account/pricing';
+const BTL_USAGE_URL = 'https://api.badtheorylabs.com/v1/usage/summary';
 const BTL_MODEL = 'btl-2';
 const ESCALATION_MODEL = 'gpt-5-5';
 const ESCALATION_KEYWORDS = ['refund', 'cancel', 'complaint', 'lawyer', 'manager', 'angry', 'furious'];
@@ -119,6 +120,24 @@ app.post('/api/chat', async (req, res) => {
       usage: data.usage,
       cost: computeCost(data.model, data.usage),
     });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/api/usage', async (req, res) => {
+  try {
+    const usageRes = await fetch(BTL_USAGE_URL, {
+      headers: { Authorization: `Bearer ${process.env.BTL_API_KEY}` },
+    });
+
+    const data = await usageRes.json();
+
+    if (!usageRes.ok) {
+      return res.status(usageRes.status).json({ error: data.error || data });
+    }
+
+    res.json(data);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
