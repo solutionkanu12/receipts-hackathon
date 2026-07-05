@@ -119,6 +119,45 @@ async function classify(message) {
   }
 }
 
+const CRITIC_SYSTEM_PROMPT = 'Is this answer safe and confident to send to a customer, or should a human review it? Reply with EXACTLY one word: yes or hold.';
+
+// Real BTL call, cheap model - a second-guess pass on a generated ESCALATED
+// answer before it reaches the customer. Fails safe: anything that isn't a
+// clean "yes" (including a failed call) blocks the send.
+async function criticCheck(message, reply) {
+  try {
+    const res = await fetchWithTimeout(BTL_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.BTL_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: BTL_MODEL,
+        messages: [
+          { role: 'system', content: CRITIC_SYSTEM_PROMPT },
+          { role: 'user', content: `Customer message: "${message}"\n\nProposed answer: "${reply}"` },
+        ],
+      }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.error('BTL critic call rejected:', data && data.error);
+      return { approved: false, cost: null };
+    }
+
+    const raw = (data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+    const approved = raw === 'yes';
+
+    return { approved, cost: computeCost(data.model, data.usage) };
+  } catch (err) {
+    console.error('BTL critic call failed:', err.message);
+    return { approved: false, cost: null };
+  }
+}
+
 // Display-only heuristic for which reason label to show on a HELD receipt.
 // The real hold decision already came from classify() above - this just
 // picks a human-readable reason for the message the model already flagged.
@@ -252,15 +291,50 @@ app.post('/api/chat', async (req, res) => {
   }
 
   const reply = data.choices?.[0]?.message?.content;
+  const cost = computeCost(data.model, data.usage);
+
+  if (isEscalated) {
+    const { approved, cost: criticCost } = await criticCheck(message, reply);
+
+    if (!approved) {
+      // Critic held it - the generated answer is discarded, never cached,
+      // never sent. The classification + generation + critic calls all
+      // really happened though, so their real cost is still shown, not
+      // hidden just because the answer itself didn't go out.
+      return res.json({
+        reply: 'This needs a human — flagged, not auto-answered.',
+        model: '—',
+        status: 'HELD',
+        usage: null,
+        cost: 0,
+        routingCost,
+        generationCost: cost,
+        criticCost,
+        reason: 'low confidence',
+      });
+    }
+
+    questionCache.set(normalized, { reply, escalated: isEscalated });
+
+    return res.json({
+      reply,
+      model: data.model,
+      status: 'ESCALATED',
+      usage: data.usage,
+      cost,
+      routingCost,
+      criticCost,
+    });
+  }
 
   questionCache.set(normalized, { reply, escalated: isEscalated });
 
   res.json({
     reply,
     model: data.model,
-    status: isEscalated ? 'ESCALATED' : 'ROUTED',
+    status: 'ROUTED',
     usage: data.usage,
-    cost: computeCost(data.model, data.usage),
+    cost,
     routingCost,
   });
 });

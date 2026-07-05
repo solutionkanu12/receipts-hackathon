@@ -765,30 +765,35 @@
     return '';
   }
 
-  function addLedgerEntry({model, status, cost, note, routingCost}){
+  function addLedgerEntry({model, status, cost, note, routingCost, generationCost, criticCost}){
     const emptyMsg = ledgerScroll.querySelector('.ledger-empty');
     if(emptyMsg) emptyMsg.remove();
     entryCount++;
     const now = new Date().toTimeString().slice(0,8);
-    sessionEntries.push({ n: entryCount, time: now, model, status, cost, note, routingCost });
+    sessionEntries.push({ n: entryCount, time: now, model, status, cost, note, routingCost, generationCost, criticCost });
 
     const el = document.createElement('div');
     el.className = 'entry';
     const isCacheHit = status === 'CACHE_HIT' || status === 'CACHE_HIT_ESCALATED';
     const statusClass = isCacheHit ? 'status-hit' : status === 'ESCALATED' ? 'status-esc' : status === 'HELD' ? 'status-held' : 'status-miss';
     const microCopy = microCopyForStatus(status);
-    const hasRoutingCost = routingCost !== undefined;
+
+    const extraCostLines = [['+ routing', routingCost], ['+ generation', generationCost], ['+ critic', criticCost]]
+      .filter(([, value]) => value !== undefined)
+      .map(([label, value]) => `<div class="entry-row"><span class="k">${label}</span><span>${fmtCost(value)}</span></div>`)
+      .join('');
+
     el.innerHTML = `
       <div class="entry-row"><span class="k">#${entryCount} · ${now}</span><span>${model}</span></div>
       <div class="entry-row"><span class="${statusClass}">${displayLabelForStatus(status)}</span><span>${fmtCost(cost)}</span></div>
-      ${hasRoutingCost ? `<div class="entry-row"><span class="k">+ routing</span><span>${fmtCost(routingCost)}</span></div>` : ''}
+      ${extraCostLines}
       ${note ? `<div class="entry-row"><span class="k">${note}</span><span></span></div>` : ''}
       ${microCopy ? `<div class="entry-micro">${microCopy}</div>` : ''}
     `;
     ledgerScroll.insertBefore(el, ledgerScroll.firstChild);
 
     const prevTotal = total;
-    total += (cost || 0) + (routingCost || 0);
+    total += (cost || 0) + (routingCost || 0) + (generationCost || 0) + (criticCost || 0);
     animateTotal(prevTotal, total);
 
     playTick(isCacheHit ? 1200 : status === 'ESCALATED' ? 320 : 700, 0.07);
@@ -803,6 +808,8 @@
       lines.push(`#${e.n}  ${e.time}  ${e.model}`);
       lines.push(`   ${displayLabelForStatus(e.status)}   ${fmtCost(e.cost)}`);
       if(e.routingCost !== undefined) lines.push(`   + routing   ${fmtCost(e.routingCost)}`);
+      if(e.generationCost !== undefined) lines.push(`   + generation   ${fmtCost(e.generationCost)}`);
+      if(e.criticCost !== undefined) lines.push(`   + critic   ${fmtCost(e.criticCost)}`);
       if(e.note) lines.push(`   ${e.note}`);
       const micro = microCopyForStatus(e.status);
       if(micro) lines.push(`   ${micro}`);
@@ -874,7 +881,15 @@
       if(data.status === 'CACHE_HIT_ESCALATED') note = '(escalated)';
       if(data.status === 'HELD' && data.reason) note = `reason: ${data.reason}`;
 
-      addLedgerEntry({ model: data.model, status: data.status, cost: data.cost, note, routingCost: data.routingCost });
+      addLedgerEntry({
+        model: data.model,
+        status: data.status,
+        cost: data.cost,
+        note,
+        routingCost: data.routingCost,
+        generationCost: data.generationCost,
+        criticCost: data.criticCost,
+      });
     } catch(err){
       clearTimeout(timeoutId);
       typing.remove();
