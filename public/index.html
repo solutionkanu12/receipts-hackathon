@@ -405,6 +405,16 @@
   .ledger-total .label{font-family:'IBM Plex Mono', monospace; font-size:12px; letter-spacing:1px; color:var(--ink-soft);}
   .ledger-total .amount{font-family:'IBM Plex Mono', monospace; font-size:22px; font-weight:600;}
 
+  .usage-stats{
+    margin-top:10px;
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:5px 14px;
+    font-size:11px;
+  }
+  .usage-stats .stat{display:flex; justify-content:space-between; gap:6px;}
+  .usage-stats .stat .k{color:var(--ink-soft);}
+
   .tear-btn{
     font-family:'IBM Plex Mono', monospace;
     font-size:11px;
@@ -539,7 +549,7 @@
         <span class="label">TOTAL SPEND</span>
         <span class="amount mono" id="totalAmount">$0.0000</span>
       </div>
-      <div class="mono" id="usageNote" style="font-size:11px;color:var(--ink-soft);margin-top:8px;"></div>
+      <div class="usage-stats mono" id="usageNote"></div>
     </section>
   </main>
   <div class="torn-bottom" style="max-width:1200px;margin:0 auto 40px;"></div>
@@ -671,14 +681,38 @@
   }
 
   let usageFetched = false;
+  function renderUsageStats(data){
+    const el = document.getElementById('usageNote');
+
+    const cacheHits = (data.cache_tiers?.exact_response || 0) + (data.cache_tiers?.semantic || 0);
+
+    const avgLatency = typeof data.avg_latency_ms === 'number'
+      ? Math.round(data.avg_latency_ms) + 'ms'
+      : '—';
+
+    let savedLine;
+    if(data.customer_saved === 0 && typeof data.benchmark_direct_cost === 'number' && typeof data.actual_upstream_cost === 'number'){
+      savedLine = `${fmt(data.actual_upstream_cost)} paid vs ${fmt(data.benchmark_direct_cost)} list`;
+    } else {
+      savedLine = fmt(data.customer_saved);
+    }
+
+    el.innerHTML = `
+      <div class="stat"><span class="k">requests</span><span>${data.request_count} (${data.success_count} ok)</span></div>
+      <div class="stat"><span class="k">saved vs list</span><span>${savedLine}</span></div>
+      <div class="stat"><span class="k">cache hits</span><span>${cacheHits}</span></div>
+      <div class="stat"><span class="k">avg latency</span><span>${avgLatency}</span></div>
+    `;
+  }
+
   function fetchUsageOnce(){
     if(usageFetched) return;
     usageFetched = true;
     fetch('/api/usage')
       .then(r => r.json())
       .then(data => {
-        if(typeof data.customer_saved === 'number'){
-          document.getElementById('usageNote').textContent = 'lifetime saved: ' + fmt(data.customer_saved);
+        if(typeof data.request_count === 'number'){
+          renderUsageStats(data);
         }
       })
       .catch(() => {});
