@@ -344,6 +344,7 @@
   }
   .reci.happy .stamp{opacity:1; color:var(--green); border:1px solid var(--green); padding:1px 2px;}
   .reci.alert .stamp{opacity:1; color:var(--red); border:1px solid var(--red); padding:1px 2px;}
+  .reci.held .stamp{opacity:1; color:var(--ink); border:1px solid var(--ink); padding:1px 2px;}
 
   .gate-reci{
     width:40px; height:48px; margin:0 auto;
@@ -391,6 +392,8 @@
   .entry .status-hit{color:var(--green); font-weight:600;}
   .entry .status-miss{color:var(--ink);}
   .entry .status-esc{color:var(--red); font-weight:600;}
+  .entry .status-held{color:var(--ink); font-weight:600;}
+  .entry-micro{color:var(--ink-soft); font-size:10.5px; margin-top:4px;}
 
   .ledger-empty{font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--ink-soft); padding:20px 0;}
 
@@ -489,7 +492,7 @@
     </svg>
     <div>
       <div class="wordmark">RECEIPTS</div>
-      <div class="tagline">the support bot that shows its work</div>
+      <div class="tagline">Restraint you can audit.</div>
     </div>
   </div>
 </div>
@@ -736,7 +739,7 @@
       const reci = document.createElement('div');
       reci.className = 'reci' + (mascotState ? ' ' + mascotState : '');
       reci.innerHTML = '<div class="mouth"></div><div class="stamp">' +
-        (mascotState === 'happy' ? 'PAID' : mascotState === 'alert' ? 'ESC' : '') + '</div>';
+        (mascotState === 'happy' ? 'FREE' : mascotState === 'alert' ? 'ESC' : mascotState === 'held' ? 'HELD' : '') + '</div>';
       const span = document.createElement('div');
       span.className = 'bot-text';
       span.textContent = text;
@@ -749,6 +752,19 @@
     chatBody.scrollTop = chatBody.scrollHeight;
   }
 
+  function displayLabelForStatus(status){
+    if(status === 'CACHE_HIT' || status === 'CACHE_HIT_ESCALATED') return 'FREE';
+    return status;
+  }
+
+  function microCopyForStatus(status){
+    if(status === 'CACHE_HIT' || status === 'CACHE_HIT_ESCALATED') return 'Seen this one — no reason to pay twice.';
+    if(status === 'ROUTED') return 'Routine — fast model.';
+    if(status === 'ESCALATED') return 'Sensitive — routed to the stronger model.';
+    if(status === 'HELD') return "A bot shouldn't answer this — flagged for a human.";
+    return '';
+  }
+
   function addLedgerEntry({model, status, cost, note}){
     const emptyMsg = ledgerScroll.querySelector('.ledger-empty');
     if(emptyMsg) emptyMsg.remove();
@@ -759,11 +775,13 @@
     const el = document.createElement('div');
     el.className = 'entry';
     const isCacheHit = status === 'CACHE_HIT' || status === 'CACHE_HIT_ESCALATED';
-    const statusClass = isCacheHit ? 'status-hit' : status === 'ESCALATED' ? 'status-esc' : 'status-miss';
+    const statusClass = isCacheHit ? 'status-hit' : status === 'ESCALATED' ? 'status-esc' : status === 'HELD' ? 'status-held' : 'status-miss';
+    const microCopy = microCopyForStatus(status);
     el.innerHTML = `
       <div class="entry-row"><span class="k">#${entryCount} · ${now}</span><span>${model}</span></div>
-      <div class="entry-row"><span class="${statusClass}">${status}</span><span>${fmtCost(cost)}</span></div>
+      <div class="entry-row"><span class="${statusClass}">${displayLabelForStatus(status)}</span><span>${fmtCost(cost)}</span></div>
       ${note ? `<div class="entry-row"><span class="k">${note}</span><span></span></div>` : ''}
+      ${microCopy ? `<div class="entry-micro">${microCopy}</div>` : ''}
     `;
     ledgerScroll.insertBefore(el, ledgerScroll.firstChild);
 
@@ -781,8 +799,10 @@
     lines.push('-'.repeat(38));
     sessionEntries.forEach(e => {
       lines.push(`#${e.n}  ${e.time}  ${e.model}`);
-      lines.push(`   ${e.status}   ${fmtCost(e.cost)}`);
+      lines.push(`   ${displayLabelForStatus(e.status)}   ${fmtCost(e.cost)}`);
       if(e.note) lines.push(`   ${e.note}`);
+      const micro = microCopyForStatus(e.status);
+      if(micro) lines.push(`   ${micro}`);
     });
     lines.push('-'.repeat(38));
     lines.push('TOTAL SPEND   ' + fmt(total));
@@ -799,6 +819,7 @@
   function mascotForStatus(status){
     if(status === 'ESCALATED') return 'alert';
     if(status === 'CACHE_HIT' || status === 'CACHE_HIT_ESCALATED') return 'happy';
+    if(status === 'HELD') return 'held';
     return null;
   }
 

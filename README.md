@@ -1,6 +1,8 @@
 # Receipts
 
-The AI support bot that shows its work. Built on [BTL Runtime](https://www.badtheorylabs.com/runtime) for the BTL Runtime Hackathon (Jul 3–5, 2026).
+A live audit layer for AI decisions — every answer itemized by model, cost, and judgment. Shown here on a support desk: routine questions get a fast, cheap model; sensitive ones escalate to a stronger model; repeats are free from cache; and the ones a bot shouldn't touch are held for a human. Built on BTL Runtime — routing, classification, caching, and live cost, all real.
+
+Built for the [BTL Runtime Hackathon](https://www.badtheorylabs.com/runtime) (Jul 3–5, 2026).
 
 **Live: https://receipts-hackathon.onrender.com** — sign in with Google and try it.
 
@@ -8,7 +10,7 @@ Every reply comes with a live ledger entry showing which model answered, whether
 
 ## Why
 
-AI support bots are a black box: you don't know what they cost per conversation, and one model answers everything, routine or sensitive. Receipts makes routing and cost visible, live, using BTL Runtime's multi-provider gateway and caching as the actual product feature, not background plumbing.
+AI support desks are a black box: you don't know what they cost per conversation, and one model answers everything, routine or sensitive. Receipts makes routing and cost visible, live, using BTL Runtime's multi-provider gateway and caching as the actual product feature, not background plumbing.
 
 ## How this uses BTL Runtime
 
