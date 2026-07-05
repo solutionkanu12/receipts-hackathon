@@ -77,9 +77,60 @@ const BTL_PRICING_URL = 'https://api.badtheorylabs.com/v1/account/pricing';
 const BTL_USAGE_URL = 'https://api.badtheorylabs.com/v1/usage/summary';
 const BTL_MODEL = 'btl-2';
 const ESCALATION_MODEL = 'gpt-5-5';
-const ESCALATION_KEYWORDS = ['refund', 'cancel', 'complaint', 'lawyer', 'manager', 'angry', 'furious'];
 
 const SYSTEM_PROMPT = 'You are a support assistant for a small online retailer. Return policy: unused items can be returned within 30 days with a receipt.';
+
+const CLASSIFY_SYSTEM_PROMPT = 'Classify a customer support message. Reply with EXACTLY one word: routine, sensitive, or hold. routine = normal questions (orders, returns policy, shipping). sensitive = refunds, cancellations, complaints, or an upset/legal tone. hold = must not be auto-answered by a bot: threats, legal action, self-harm, or anything unsafe to answer without a human. Output only the single word.';
+
+// Real BTL call, cheap model - the routing decision itself, replacing keyword matching.
+// Fails safe (toward the more careful "sensitive" path), never fail-cheap: any
+// unparseable output or upstream failure defaults to "sensitive", not "routine".
+async function classify(message) {
+  try {
+    const res = await fetchWithTimeout(BTL_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.BTL_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: BTL_MODEL,
+        messages: [
+          { role: 'system', content: CLASSIFY_SYSTEM_PROMPT },
+          { role: 'user', content: message },
+        ],
+      }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.error('BTL classification call rejected:', data && data.error);
+      return { classification: 'sensitive', cost: null };
+    }
+
+    const raw = (data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+    const classification = ['routine', 'sensitive', 'hold'].includes(raw) ? raw : 'sensitive';
+
+    return { classification, cost: computeCost(data.model, data.usage) };
+  } catch (err) {
+    console.error('BTL classification call failed:', err.message);
+    return { classification: 'sensitive', cost: null };
+  }
+}
+
+// Display-only heuristic for which reason label to show on a HELD receipt.
+// The real hold decision already came from classify() above - this just
+// picks a human-readable reason for the message the model already flagged.
+const SELF_HARM_WORDS = ['suicide', 'kill myself', 'hurt myself', 'self-harm', 'self harm', 'end my life', 'want to die'];
+const LEGAL_THREAT_WORDS = ['lawyer', 'attorney', 'sue', 'lawsuit', 'legal action', 'threat', 'kill you', 'hurt you'];
+
+function heldReasonLabel(message) {
+  const lower = message.toLowerCase();
+  if (SELF_HARM_WORDS.some((w) => lower.includes(w))) return 'distress';
+  if (LEGAL_THREAT_WORDS.some((w) => lower.includes(w))) return 'legal / threat';
+  return 'low confidence';
+}
 
 const questionCache = new Map();
 const pricingByModel = new Map();
@@ -132,6 +183,9 @@ app.post('/api/chat', async (req, res) => {
 
   const normalized = message.trim().toLowerCase();
 
+  // Cache check runs first, before any classification call - a cache hit can
+  // only ever be a previously routine/sensitive answer (hold results are
+  // never written to this cache below), so no re-classification is needed.
   if (questionCache.has(normalized)) {
     const cached = questionCache.get(normalized);
     return res.json({
@@ -143,7 +197,21 @@ app.post('/api/chat', async (req, res) => {
     });
   }
 
-  const isEscalated = ESCALATION_KEYWORDS.some((keyword) => normalized.includes(keyword));
+  const { classification, cost: routingCost } = await classify(message);
+
+  if (classification === 'hold') {
+    return res.json({
+      reply: 'This needs a human — flagged, not auto-answered.',
+      model: '—',
+      status: 'HELD',
+      usage: null,
+      cost: 0,
+      routingCost,
+      reason: heldReasonLabel(message),
+    });
+  }
+
+  const isEscalated = classification === 'sensitive';
 
   let btlRes;
   try {
@@ -193,6 +261,7 @@ app.post('/api/chat', async (req, res) => {
     status: isEscalated ? 'ESCALATED' : 'ROUTED',
     usage: data.usage,
     cost: computeCost(data.model, data.usage),
+    routingCost,
   });
 });
 
