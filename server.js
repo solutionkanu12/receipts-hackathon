@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,6 +13,33 @@ app.use(express.static(path.join(__dirname, 'public')));
 // separate from the static frontend.
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'receipts-backend' });
+});
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+app.post('/api/auth/verify', async (req, res) => {
+  const { credential } = req.body || {};
+
+  if (typeof credential !== 'string' || !credential) {
+    return res.status(401).json({ error: 'credential is required' });
+  }
+
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+
+    res.json({
+      name: payload.name,
+      email: payload.email,
+      picture: payload.picture,
+      verified: true,
+    });
+  } catch (err) {
+    res.status(401).json({ error: 'invalid or expired credential' });
+  }
 });
 
 const BTL_API_URL = 'https://api.badtheorylabs.com/v1/chat/completions';

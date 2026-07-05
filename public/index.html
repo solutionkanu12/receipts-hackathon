@@ -491,9 +491,8 @@
     <h1>sign in to continue</h1>
     <p>one account, no passwords. we use it to keep your session's ledger yours.</p>
     <div class="g-btn-wrap" id="googleBtnContainer"></div>
-    <p class="gate-fine">sign-in uses Google's real identity service. your name, email and photo are read from Google's own token, decoded in your browser — nothing is sent to a server in this prototype.</p>
+    <p class="gate-fine">sign-in uses Google's real identity service. your Google ID token is verified server-side before your name, email and photo are used.</p>
     <p class="gate-setup-note" id="setupNote"></p>
-    <button class="icon-btn" id="demoSkipBtn" style="margin-top:16px;">skip for now — preview as demo user</button>
   </div>
 </div>
 
@@ -565,20 +564,30 @@
      below. Must be served over http/https — opening this file
      directly as file:// will not authenticate.
      ========================================================= */
-  const GOOGLE_CLIENT_ID = "YOUR_CLIENT_ID.apps.googleusercontent.com";
+  const GOOGLE_CLIENT_ID = "548070193178-d5j704rq777l1s3gaacp7ivmsfmegc6o.apps.googleusercontent.com";
 
   let currentUser = null;
 
-  function parseJwt(token){
-    const base64 = token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-    const json = decodeURIComponent(atob(base64).split('').map(c =>
-      '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
-    return JSON.parse(json);
-  }
+  async function handleCredentialResponse(response){
+    let data;
+    try {
+      const verifyRes = await fetch('/api/auth/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential: response.credential }),
+      });
+      data = await verifyRes.json();
+      if(!verifyRes.ok || !data.verified){
+        document.getElementById('setupNote').textContent = 'sign-in failed: ' + (data.error || verifyRes.statusText);
+        return;
+      }
+    } catch(err){
+      document.getElementById('setupNote').textContent = 'sign-in failed: ' + err.message;
+      return;
+    }
 
-  function handleCredentialResponse(response){
-    const data = parseJwt(response.credential);
-    currentUser = { name:data.name, given_name:data.given_name, email:data.email, picture:data.picture };
+    const given_name = data.name ? data.name.split(' ')[0] : data.email;
+    currentUser = { name:data.name, given_name, email:data.email, picture:data.picture };
     document.getElementById('signinGate').classList.add('hidden');
     document.getElementById('mainApp').classList.remove('hidden');
     const chip = document.getElementById('userChip');
@@ -589,26 +598,6 @@
     }
     fetchUsageOnce();
   }
-
-  document.getElementById('demoSkipBtn').addEventListener('click', () => {
-    /* prototype-only bypass — not a real sign-in, just lets you preview
-       the app before the Google OAuth client id is set up. remove this
-       button once real auth is wired for the submission. */
-    currentUser = {
-      name: 'Demo User',
-      given_name: 'there',
-      email: 'demo@prototype.local',
-      picture: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='40' height='40'><rect width='40' height='40' fill='%231B1B18'/><text x='50%25' y='58%25' font-size='16' fill='%23F7F3E9' text-anchor='middle' font-family='monospace'>D</text></svg>"
-    };
-    document.getElementById('signinGate').classList.add('hidden');
-    document.getElementById('mainApp').classList.remove('hidden');
-    const chip = document.getElementById('userChip');
-    chip.innerHTML = `<img src="${currentUser.picture}" alt=""><span>${currentUser.given_name}</span>`;
-    if(!document.getElementById('chatBody').children.length){
-      addMessage('bot', `ask something, ${currentUser.given_name}.`, null);
-    }
-    fetchUsageOnce();
-  });
 
   window.addEventListener('load', () => {
     if(GOOGLE_CLIENT_ID.startsWith('YOUR_CLIENT_ID')){
