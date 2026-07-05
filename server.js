@@ -1,18 +1,18 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render (and most hosts) terminate TLS at a proxy and forward plain HTTP,
+// setting x-forwarded-proto. Without this, req.secure is always false behind
+// the proxy, which would make the session cookie's `secure` flag wrong.
+app.set('trust proxy', 1);
+
 app.use(express.json());
-app.use((err, req, res, next) => {
-  if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
-    return res.status(400).json({ error: 'malformed JSON in request body' });
-  }
-  next(err);
-});
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Simple health check - confirms the server is actually running,
@@ -22,6 +22,67 @@ app.get('/api/health', (req, res) => {
 });
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// ---------- sessions ----------
+// Minimal signed-cookie session, no extra dependency: HMAC-SHA256 over a
+// JSON payload using the existing SESSION_SECRET. Not a JWT, just enough to
+// prove "this cookie was issued by us and hasn't expired or been tampered with."
+const SESSION_COOKIE_NAME = 'receipts_session';
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function signSessionPayload(payloadB64) {
+  return crypto.createHmac('sha256', process.env.SESSION_SECRET).update(payloadB64).digest('base64url');
+}
+
+function createSessionToken(email) {
+  const payloadB64 = Buffer.from(JSON.stringify({ email, exp: Date.now() + SESSION_MAX_AGE_MS })).toString('base64url');
+  return `${payloadB64}.${signSessionPayload(payloadB64)}`;
+}
+
+function verifySessionToken(token) {
+  if (typeof token !== 'string' || !token.includes('.')) return null;
+
+  const [payloadB64, signature] = token.split('.');
+  const expected = signSessionPayload(payloadB64 || '');
+  const sigBuf = Buffer.from(signature || '', 'base64url');
+  const expectedBuf = Buffer.from(expected, 'base64url');
+
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    if (typeof payload.exp !== 'number' || Date.now() > payload.exp) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const cookies = {};
+  if (!header) return cookies;
+  header.split(';').forEach((pair) => {
+    const idx = pair.indexOf('=');
+    if (idx === -1) return;
+    cookies[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+  });
+  return cookies;
+}
+
+function requireSession(req, res, next) {
+  const token = parseCookies(req)[SESSION_COOKIE_NAME];
+  const session = token && verifySessionToken(token);
+
+  if (!session) {
+    return res.status(401).json({ error: 'sign in required' });
+  }
+
+  req.session = session;
+  next();
+}
 
 const UPSTREAM_TIMEOUT_MS = 20000;
 
@@ -59,6 +120,14 @@ app.post('/api/auth/verify', async (req, res) => {
       'Google verification timed out'
     );
     const payload = ticket.getPayload();
+
+    res.cookie(SESSION_COOKIE_NAME, createSessionToken(payload.email), {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: req.secure,
+      maxAge: SESSION_MAX_AGE_MS,
+      path: '/',
+    });
 
     res.json({
       name: payload.name,
@@ -172,6 +241,33 @@ function heldReasonLabel(message) {
 }
 
 const questionCache = new Map();
+const CACHE_MAX_SIZE = 500;
+
+// Normalizes trivial formatting differences (case, extra whitespace, trailing
+// punctuation) so near-identical phrasings of the same question still hit the
+// cache. This is NOT paraphrase/semantic matching - BTL has no embeddings
+// endpoint available, so that's a deliberate scope limit here, not an oversight.
+function normalizeForCache(message) {
+  return message
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[?!.]+$/, '');
+}
+
+// Simple LRU cap: only ever called for routine/ROUTED answers (see /api/chat -
+// ESCALATED and HELD results are never written here, since a stale cached
+// answer resurfacing on someone else's refund complaint or legal threat is
+// the one place a wrong cache hit does real damage). Evicts the oldest entry
+// once over the cap so a long-running host can't grow this unbounded.
+function cacheSet(key, value) {
+  if (questionCache.has(key)) questionCache.delete(key);
+  questionCache.set(key, value);
+  if (questionCache.size > CACHE_MAX_SIZE) {
+    questionCache.delete(questionCache.keys().next().value);
+  }
+}
+
 const pricingByModel = new Map();
 
 // Some models are billed at an explicit per-token rate; others (shared_savings)
@@ -213,24 +309,25 @@ function computeCost(model, usage) {
   return inputCost + outputCost;
 }
 
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', requireSession, async (req, res) => {
   const { message } = req.body || {};
 
   if (typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({ error: 'message is required' });
   }
 
-  const normalized = message.trim().toLowerCase();
+  const normalized = normalizeForCache(message);
 
   // Cache check runs first, before any classification call - a cache hit can
-  // only ever be a previously routine/sensitive answer (hold results are
-  // never written to this cache below), so no re-classification is needed.
+  // only ever be a previously ROUTED (routine) answer, since ESCALATED and
+  // HELD results are never written to this cache (see below), so no
+  // re-classification is needed.
   if (questionCache.has(normalized)) {
     const cached = questionCache.get(normalized);
     return res.json({
       reply: cached.reply,
       model: 'cache',
-      status: cached.escalated ? 'CACHE_HIT_ESCALATED' : 'CACHE_HIT',
+      status: 'CACHE_HIT',
       usage: null,
       cost: 0,
     });
@@ -291,6 +388,14 @@ app.post('/api/chat', async (req, res) => {
   }
 
   const reply = data.choices?.[0]?.message?.content;
+
+  // Content filter, truncation, or any other reason the model returned no
+  // usable text - never cache or display this as if it were a real answer.
+  if (typeof reply !== 'string' || !reply.trim()) {
+    console.error('BTL chat response had no usable content:', JSON.stringify(data));
+    return res.status(502).json({ error: 'the model returned an empty response, please try again' });
+  }
+
   const cost = computeCost(data.model, data.usage);
 
   if (isEscalated) {
@@ -314,8 +419,9 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    questionCache.set(normalized, { reply, escalated: isEscalated });
-
+    // ESCALATED answers are never cached - a stale answer resurfacing for a
+    // different user on a refund complaint is the one place a wrong cache
+    // hit does real damage, so every sensitive question is re-run in full.
     return res.json({
       reply,
       model: data.model,
@@ -327,7 +433,7 @@ app.post('/api/chat', async (req, res) => {
     });
   }
 
-  questionCache.set(normalized, { reply, escalated: isEscalated });
+  cacheSet(normalized, { reply });
 
   res.json({
     reply,
@@ -339,7 +445,7 @@ app.post('/api/chat', async (req, res) => {
   });
 });
 
-app.get('/api/usage', async (req, res) => {
+app.get('/api/usage', requireSession, async (req, res) => {
   let usageRes;
   try {
     usageRes = await fetchWithTimeout(BTL_USAGE_URL, {
@@ -368,6 +474,17 @@ app.get('/api/usage', async (req, res) => {
   }
 
   res.json(data);
+});
+
+// Catch-all error handler - registered after every route so it also catches
+// errors thrown inside route handlers, not just express.json()'s body-parse
+// failures (a 4-arg middleware only works as a catch-all when it comes last).
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'malformed JSON in request body' });
+  }
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'something went wrong' });
 });
 
 loadPricing()
