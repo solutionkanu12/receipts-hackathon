@@ -7,6 +7,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'malformed JSON in request body' });
+  }
+  next(err);
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Simple health check - confirms the server is actually running,
@@ -17,6 +23,28 @@ app.get('/api/health', (req, res) => {
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+const UPSTREAM_TIMEOUT_MS = 20000;
+
+// Bounds any upstream call so a hung network request can never hang this
+// server forever - critical at boot too, since loadPricing() gates app.listen().
+function withTimeout(promise, ms, timeoutMessage) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error(timeoutMessage), { name: 'TimeoutError' })), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 app.post('/api/auth/verify', async (req, res) => {
   const { credential } = req.body || {};
 
@@ -25,10 +53,11 @@ app.post('/api/auth/verify', async (req, res) => {
   }
 
   try {
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
+    const ticket = await withTimeout(
+      googleClient.verifyIdToken({ idToken: credential, audience: process.env.GOOGLE_CLIENT_ID }),
+      UPSTREAM_TIMEOUT_MS,
+      'Google verification timed out'
+    );
     const payload = ticket.getPayload();
 
     res.json({
@@ -38,6 +67,7 @@ app.post('/api/auth/verify', async (req, res) => {
       verified: true,
     });
   } catch (err) {
+    console.error('Google token verification failed:', err.message);
     res.status(401).json({ error: 'invalid or expired credential' });
   }
 });
@@ -58,7 +88,7 @@ const pricingByModel = new Map();
 // only publish a benchmark price range, so we use the midpoint as the best
 // available per-token estimate.
 async function loadPricing() {
-  const res = await fetch(BTL_PRICING_URL, {
+  const res = await fetchWithTimeout(BTL_PRICING_URL, {
     headers: { Authorization: `Bearer ${process.env.BTL_API_KEY}` },
   });
   const data = await res.json();
@@ -115,8 +145,9 @@ app.post('/api/chat', async (req, res) => {
 
   const isEscalated = ESCALATION_KEYWORDS.some((keyword) => normalized.includes(keyword));
 
+  let btlRes;
   try {
-    const btlRes = await fetch(BTL_API_URL, {
+    btlRes = await fetchWithTimeout(BTL_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -130,45 +161,70 @@ app.post('/api/chat', async (req, res) => {
         ],
       }),
     });
-
-    const data = await btlRes.json();
-
-    if (!btlRes.ok) {
-      return res.status(btlRes.status).json({ error: data.error || data });
-    }
-
-    const reply = data.choices?.[0]?.message?.content;
-
-    questionCache.set(normalized, { reply, escalated: isEscalated });
-
-    res.json({
-      reply,
-      model: data.model,
-      status: isEscalated ? 'ESCALATED' : 'ROUTED',
-      usage: data.usage,
-      cost: computeCost(data.model, data.usage),
-    });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error('BTL chat request failed:', err.message);
+    const timedOut = err.name === 'AbortError';
+    return res.status(timedOut ? 504 : 502).json({
+      error: timedOut
+        ? 'the model took too long to respond, please try again'
+        : 'could not reach the model right now, please try again',
+    });
   }
+
+  let data;
+  try {
+    data = await btlRes.json();
+  } catch (err) {
+    console.error('BTL chat response was not valid JSON:', err.message);
+    return res.status(502).json({ error: 'got an unreadable response from the model, please try again' });
+  }
+
+  if (!btlRes.ok) {
+    return res.status(btlRes.status).json({ error: (data && data.error) || 'the model rejected the request' });
+  }
+
+  const reply = data.choices?.[0]?.message?.content;
+
+  questionCache.set(normalized, { reply, escalated: isEscalated });
+
+  res.json({
+    reply,
+    model: data.model,
+    status: isEscalated ? 'ESCALATED' : 'ROUTED',
+    usage: data.usage,
+    cost: computeCost(data.model, data.usage),
+  });
 });
 
 app.get('/api/usage', async (req, res) => {
+  let usageRes;
   try {
-    const usageRes = await fetch(BTL_USAGE_URL, {
+    usageRes = await fetchWithTimeout(BTL_USAGE_URL, {
       headers: { Authorization: `Bearer ${process.env.BTL_API_KEY}` },
     });
-
-    const data = await usageRes.json();
-
-    if (!usageRes.ok) {
-      return res.status(usageRes.status).json({ error: data.error || data });
-    }
-
-    res.json(data);
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error('BTL usage request failed:', err.message);
+    const timedOut = err.name === 'AbortError';
+    return res.status(timedOut ? 504 : 502).json({
+      error: timedOut
+        ? 'usage summary took too long to respond, please try again'
+        : 'could not reach the usage summary right now, please try again',
+    });
   }
+
+  let data;
+  try {
+    data = await usageRes.json();
+  } catch (err) {
+    console.error('BTL usage response was not valid JSON:', err.message);
+    return res.status(502).json({ error: 'got an unreadable response from the usage summary, please try again' });
+  }
+
+  if (!usageRes.ok) {
+    return res.status(usageRes.status).json({ error: (data && data.error) || 'the usage summary request failed' });
+  }
+
+  res.json(data);
 });
 
 loadPricing()

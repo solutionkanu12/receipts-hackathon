@@ -779,18 +779,32 @@
     chatBody.appendChild(typing);
     chatBody.scrollTop = chatBody.scrollHeight;
 
+    const FAILURE_MESSAGE = "that didn't go through — try again.";
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
+        signal: controller.signal,
       });
-      const data = await res.json();
+      clearTimeout(timeoutId);
       typing.remove();
 
+      let data;
+      try {
+        data = await res.json();
+      } catch(parseErr){
+        console.error('chat response was not valid JSON:', parseErr);
+        addMessage('bot', FAILURE_MESSAGE, 'alert');
+        return;
+      }
+
       if(!res.ok){
-        const errText = (data.error && data.error.message) || data.error || res.statusText;
-        addMessage('bot', 'something went wrong: ' + errText, 'alert');
+        console.error('chat request failed:', data.error);
+        addMessage('bot', FAILURE_MESSAGE, 'alert');
         return;
       }
 
@@ -799,8 +813,10 @@
       const note = data.status === 'CACHE_HIT_ESCALATED' ? '(escalated)' : null;
       addLedgerEntry({ model: data.model, status: data.status, cost: data.cost, note });
     } catch(err){
+      clearTimeout(timeoutId);
       typing.remove();
-      addMessage('bot', 'network error: ' + err.message, 'alert');
+      console.error('chat request error:', err);
+      addMessage('bot', FAILURE_MESSAGE, 'alert');
     }
   }
 
