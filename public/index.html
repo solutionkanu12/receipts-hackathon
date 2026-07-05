@@ -507,7 +507,7 @@
     </div>
   </div>
 
-  <p class="note">prototype — layout, motion and interaction only. routing logic shown here mirrors the real plan (cache check, cheap-model default, escalation trigger) but is not yet wired to live BTL calls.</p>
+  <p class="note">live — every reply below is a real BTL call, routed and cached by the actual backend (cache check, cheap-model default, escalation trigger).</p>
 
   <main>
     <section class="chat-col">
@@ -537,6 +537,7 @@
         <span class="label">TOTAL SPEND</span>
         <span class="amount mono" id="totalAmount">$0.0000</span>
       </div>
+      <div class="mono" id="usageNote" style="font-size:11px;color:var(--ink-soft);margin-top:8px;"></div>
     </section>
   </main>
   <div class="torn-bottom" style="max-width:1200px;margin:0 auto 40px;"></div>
@@ -585,6 +586,7 @@
     if(emptyHint && !emptyHint.children.length){
       addMessage('bot', `ask something, ${currentUser.given_name || currentUser.name}.`, null);
     }
+    fetchUsageOnce();
   }
 
   document.getElementById('demoSkipBtn').addEventListener('click', () => {
@@ -604,6 +606,7 @@
     if(!document.getElementById('chatBody').children.length){
       addMessage('bot', `ask something, ${currentUser.given_name}.`, null);
     }
+    fetchUsageOnce();
   });
 
   window.addEventListener('load', () => {
@@ -672,11 +675,23 @@
 
   let total = 0;
   let entryCount = 0;
-  const seen = new Map();
   const sessionEntries = [];
-  const ESCALATE_WORDS = ['refund','cancel','angry','lawyer','complaint','manager','furious'];
 
-  function fmt(n){ return '$' + n.toFixed(4); }
+  function fmt(n){ return '$' + (n || 0).toFixed(4); }
+
+  let usageFetched = false;
+  function fetchUsageOnce(){
+    if(usageFetched) return;
+    usageFetched = true;
+    fetch('/api/usage')
+      .then(r => r.json())
+      .then(data => {
+        if(typeof data.customer_saved === 'number'){
+          document.getElementById('usageNote').textContent = 'lifetime saved: ' + fmt(data.customer_saved);
+        }
+      })
+      .catch(() => {});
+  }
 
   function animateTotal(from, to){
     const start = performance.now();
@@ -718,7 +733,8 @@
 
     const el = document.createElement('div');
     el.className = 'entry';
-    const statusClass = status === 'CACHE HIT' ? 'status-hit' : status === 'ESCALATED' ? 'status-esc' : 'status-miss';
+    const isCacheHit = status === 'CACHE_HIT' || status === 'CACHE_HIT_ESCALATED';
+    const statusClass = isCacheHit ? 'status-hit' : status === 'ESCALATED' ? 'status-esc' : 'status-miss';
     el.innerHTML = `
       <div class="entry-row"><span class="k">#${entryCount} · ${now}</span><span>${model}</span></div>
       <div class="entry-row"><span class="${statusClass}">${status}</span><span>${fmt(cost)}</span></div>
@@ -727,10 +743,10 @@
     ledgerScroll.insertBefore(el, ledgerScroll.firstChild);
 
     const prevTotal = total;
-    total += cost;
+    total += (cost || 0);
     animateTotal(prevTotal, total);
 
-    playTick(status === 'CACHE HIT' ? 1200 : status === 'ESCALATED' ? 320 : 700, 0.07);
+    playTick(isCacheHit ? 1200 : status === 'ESCALATED' ? 320 : 700, 0.07);
   }
 
   function tearOffReceipt(){
@@ -755,7 +771,13 @@
   }
   tearBtn.addEventListener('click', tearOffReceipt);
 
-  function handleSend(text){
+  function mascotForStatus(status){
+    if(status === 'ESCALATED') return 'alert';
+    if(status === 'CACHE_HIT' || status === 'CACHE_HIT_ESCALATED') return 'happy';
+    return null;
+  }
+
+  async function handleSend(text){
     text = text.trim();
     if(!text) return;
     ensureAudio();
@@ -768,27 +790,29 @@
     chatBody.appendChild(typing);
     chatBody.scrollTop = chatBody.scrollHeight;
 
-    setTimeout(() => {
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+      const data = await res.json();
       typing.remove();
-      const key = text.toLowerCase();
-      const isEscalation = ESCALATE_WORDS.some(w => key.includes(w));
-      const isDuplicate = seen.has(key);
 
-      if(isDuplicate){
-        addMessage('bot', seen.get(key), 'happy');
-        addLedgerEntry({ model:'cache', status:'CACHE HIT', cost:0, note:'duplicate of an earlier question' });
-      } else if(isEscalation){
-        const reply = "This needs a careful answer, connecting you with our senior response model.";
-        seen.set(key, reply);
-        addMessage('bot', reply, 'alert');
-        addLedgerEntry({ model:'claude-haiku-4-5', status:'ESCALATED', cost:0.0142 });
-      } else {
-        const reply = "Here is our return policy: unused items can be returned within 30 days with a receipt.";
-        seen.set(key, reply);
-        addMessage('bot', reply, null);
-        addLedgerEntry({ model:'deepseek (cheap)', status:'ROUTED', cost:0.0011 });
+      if(!res.ok){
+        const errText = (data.error && data.error.message) || data.error || res.statusText;
+        addMessage('bot', 'something went wrong: ' + errText, 'alert');
+        return;
       }
-    }, 700);
+
+      addMessage('bot', data.reply, mascotForStatus(data.status));
+
+      const note = data.status === 'CACHE_HIT_ESCALATED' ? '(escalated)' : null;
+      addLedgerEntry({ model: data.model, status: data.status, cost: data.cost, note });
+    } catch(err){
+      typing.remove();
+      addMessage('bot', 'network error: ' + err.message, 'alert');
+    }
   }
 
   sendBtn.addEventListener('click', () => handleSend(chatInput.value));
