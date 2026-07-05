@@ -175,6 +175,6 @@ loadPricing()
   .catch((err) => console.error('Failed to load BTL pricing:', err.message))
   .finally(() => {
     app.listen(PORT, () => {
-      console.log(`Receipts server running on http://localhost:${PORT}`);
+      console.log(`Receipts server listening on port ${PORT}`);
     });
   });

@@ -14,11 +14,11 @@ Built incrementally, verified at each step with real API calls — nothing in th
 
 - [x] Real BTL Runtime chat completions (`POST /api/chat`)
 - [x] Duplicate-question cache detection (repeat questions cost $0, no second API call)
-- [ ] Escalation routing to a stronger model for sensitive questions
-- [ ] Real per-message cost from BTL's pricing data
-- [ ] Live usage/savings panel (`GET /v1/usage/summary`)
-- [ ] Google sign-in with server-side token verification
-- [ ] Deployed to a public URL
+- [x] Escalation routing to a stronger model for sensitive questions
+- [x] Real per-message cost from BTL's pricing data
+- [x] Live usage/savings panel (`GET /api/usage`, proxying `GET /v1/usage/summary`)
+- [x] Google sign-in with server-side token verification (`POST /api/auth/verify`)
+- [x] Deployed to a public URL (https://receipts-hackathon.onrender.com)
 
 ## Stack
 
@@ -35,22 +35,27 @@ cp .env.example .env   # fill in BTL_API_KEY at minimum
 npm start
 ```
 
-Visit `http://localhost:3000`.
+Visit `http://localhost:$PORT` (defaults to 3000 if `PORT` isn't set).
+
+Live deployment: https://receipts-hackathon.onrender.com
 
 ## Environment variables
 
 | Variable | Required for |
 |---|---|
-| `BTL_API_KEY` | Any chat call |
-| `SESSION_SECRET` | Signing session tokens (any random string) |
-| `GOOGLE_CLIENT_ID` | Sign-in (added in a later step) |
+| `BTL_API_KEY` | Any chat call, pricing, and usage summary |
+| `GOOGLE_CLIENT_ID` | Sign-in (client-side button + server-side token verification) |
+| `PORT` | Which port the server listens on (most hosting platforms set this automatically) |
+| `SESSION_SECRET` | Reserved for future session-signing — not currently read by any code |
 
 ## API routes
 
 | Route | Does |
 |---|---|
 | `GET /api/health` | Health check |
-| `POST /api/chat` | Sends `{message}`, returns `{reply, model, status, usage}` — routes to cache, default model, or an escalated model depending on the question |
+| `POST /api/chat` | Sends `{message}`, returns `{reply, model, status, usage, cost}` — routes to cache, default model, or an escalated model depending on the question |
+| `GET /api/usage` | Proxies BTL's live usage/savings summary |
+| `POST /api/auth/verify` | Verifies a Google ID token server-side, returns `{name, email, picture, verified}` or 401 |
 
 ## Author
 
