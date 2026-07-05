@@ -552,6 +552,7 @@
         <span class="label">TOTAL SPEND</span>
         <span class="amount mono" id="totalAmount">$0.0000</span>
       </div>
+      <div class="entry-micro mono">btl-2 cost is an exact billed rate. gpt-5-5 is priced from a benchmark range, so its cost (marked est.) is a midpoint estimate.</div>
       <div class="usage-stats mono" id="usageNote"></div>
     </section>
   </main>
@@ -679,8 +680,9 @@
 
   function fmt(n){ return '$' + (n || 0).toFixed(4); }
 
-  function fmtCost(cost){
-    return (cost === null || cost === undefined) ? 'cost unknown' : fmt(cost);
+  function fmtCost(cost, isEstimate){
+    if(cost === null || cost === undefined) return 'cost unknown';
+    return fmt(cost) + (isEstimate ? ' est.' : '');
   }
 
   let usageFetched = false;
@@ -765,12 +767,12 @@
     return '';
   }
 
-  function addLedgerEntry({model, status, cost, note, routingCost, generationCost, criticCost}){
+  function addLedgerEntry({model, status, cost, costIsEstimate, note, routingCost, generationCost, generationCostIsEstimate, criticCost}){
     const emptyMsg = ledgerScroll.querySelector('.ledger-empty');
     if(emptyMsg) emptyMsg.remove();
     entryCount++;
     const now = new Date().toTimeString().slice(0,8);
-    sessionEntries.push({ n: entryCount, time: now, model, status, cost, note, routingCost, generationCost, criticCost });
+    sessionEntries.push({ n: entryCount, time: now, model, status, cost, costIsEstimate, note, routingCost, generationCost, generationCostIsEstimate, criticCost });
 
     const el = document.createElement('div');
     el.className = 'entry';
@@ -778,14 +780,16 @@
     const statusClass = isCacheHit ? 'status-hit' : status === 'ESCALATED' ? 'status-esc' : status === 'HELD' ? 'status-held' : 'status-miss';
     const microCopy = microCopyForStatus(status);
 
-    const extraCostLines = [['+ routing', routingCost], ['+ generation', generationCost], ['+ critic', criticCost]]
+    // routing and critic costs are always btl-2 (exact); only generation cost
+    // can be gpt-5-5 (estimate), so only it carries an estimate flag.
+    const extraCostLines = [['+ routing', routingCost, false], ['+ generation', generationCost, generationCostIsEstimate], ['+ critic', criticCost, false]]
       .filter(([, value]) => value !== undefined)
-      .map(([label, value]) => `<div class="entry-row"><span class="k">${label}</span><span>${fmtCost(value)}</span></div>`)
+      .map(([label, value, isEst]) => `<div class="entry-row"><span class="k">${label}</span><span>${fmtCost(value, isEst)}</span></div>`)
       .join('');
 
     el.innerHTML = `
       <div class="entry-row"><span class="k">#${entryCount} · ${now}</span><span>${model}</span></div>
-      <div class="entry-row"><span class="${statusClass}">${displayLabelForStatus(status)}</span><span>${fmtCost(cost)}</span></div>
+      <div class="entry-row"><span class="${statusClass}">${displayLabelForStatus(status)}</span><span>${fmtCost(cost, costIsEstimate)}</span></div>
       ${extraCostLines}
       ${note ? `<div class="entry-row"><span class="k">${note}</span><span></span></div>` : ''}
       ${microCopy ? `<div class="entry-micro">${microCopy}</div>` : ''}
@@ -806,9 +810,9 @@
     lines.push('-'.repeat(38));
     sessionEntries.forEach(e => {
       lines.push(`#${e.n}  ${e.time}  ${e.model}`);
-      lines.push(`   ${displayLabelForStatus(e.status)}   ${fmtCost(e.cost)}`);
+      lines.push(`   ${displayLabelForStatus(e.status)}   ${fmtCost(e.cost, e.costIsEstimate)}`);
       if(e.routingCost !== undefined) lines.push(`   + routing   ${fmtCost(e.routingCost)}`);
-      if(e.generationCost !== undefined) lines.push(`   + generation   ${fmtCost(e.generationCost)}`);
+      if(e.generationCost !== undefined) lines.push(`   + generation   ${fmtCost(e.generationCost, e.generationCostIsEstimate)}`);
       if(e.criticCost !== undefined) lines.push(`   + critic   ${fmtCost(e.criticCost)}`);
       if(e.note) lines.push(`   ${e.note}`);
       const micro = microCopyForStatus(e.status);
@@ -885,9 +889,11 @@
         model: data.model,
         status: data.status,
         cost: data.cost,
+        costIsEstimate: data.costIsEstimate,
         note,
         routingCost: data.routingCost,
         generationCost: data.generationCost,
+        generationCostIsEstimate: data.generationCostIsEstimate,
         criticCost: data.criticCost,
       });
     } catch(err){

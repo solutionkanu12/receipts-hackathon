@@ -270,6 +270,12 @@ function cacheSet(key, value) {
 
 const pricingByModel = new Map();
 
+// Models priced with explicit_sell_rates give an exact billed cost. Models
+// priced only from a shared_savings benchmark range give a midpoint estimate,
+// not an exact rate - tracked here so the UI can label those costs `est.`
+// instead of presenting them as an exact billed number.
+const estimatedPricingModels = new Set();
+
 // Some models are billed at an explicit per-token rate; others (shared_savings)
 // only publish a benchmark price range, so we use the midpoint as the best
 // available per-token estimate.
@@ -285,6 +291,7 @@ async function loadPricing() {
 
     let inputPerMtok;
     let outputPerMtok;
+    let isEstimate = false;
 
     if (explicit?.pricing_model === 'explicit_sell_rates') {
       inputPerMtok = explicit.input_per_mtok;
@@ -292,10 +299,16 @@ async function loadPricing() {
     } else if (benchmark) {
       inputPerMtok = (benchmark.input_per_mtok_min + benchmark.input_per_mtok_max) / 2;
       outputPerMtok = (benchmark.output_per_mtok_min + benchmark.output_per_mtok_max) / 2;
+      isEstimate = true;
     }
 
     if (inputPerMtok != null && outputPerMtok != null) {
       pricingByModel.set(entry.id, { inputPerMtok, outputPerMtok });
+      if (isEstimate) {
+        estimatedPricingModels.add(entry.id);
+      } else {
+        estimatedPricingModels.delete(entry.id);
+      }
     }
   }
 }
@@ -397,6 +410,10 @@ app.post('/api/chat', requireSession, async (req, res) => {
   }
 
   const cost = computeCost(data.model, data.usage);
+  // gpt-5-5 is priced from a shared_savings benchmark range, so its cost is a
+  // midpoint estimate, not an exact billed number - flagged here so the UI
+  // can label it `est.` instead of presenting it as an exact rate like btl-2.
+  const costIsEstimate = estimatedPricingModels.has(data.model);
 
   if (isEscalated) {
     const { approved, cost: criticCost } = await criticCheck(message, reply);
@@ -414,6 +431,7 @@ app.post('/api/chat', requireSession, async (req, res) => {
         cost: 0,
         routingCost,
         generationCost: cost,
+        generationCostIsEstimate: costIsEstimate,
         criticCost,
         reason: 'low confidence',
       });
@@ -428,6 +446,7 @@ app.post('/api/chat', requireSession, async (req, res) => {
       status: 'ESCALATED',
       usage: data.usage,
       cost,
+      costIsEstimate,
       routingCost,
       criticCost,
     });
@@ -441,6 +460,7 @@ app.post('/api/chat', requireSession, async (req, res) => {
     status: 'ROUTED',
     usage: data.usage,
     cost,
+    costIsEstimate,
     routingCost,
   });
 });
